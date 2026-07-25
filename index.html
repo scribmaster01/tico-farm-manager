@@ -2065,12 +2065,9 @@
           <label>Téléphone</label>
           <input type="tel" name="phone" required placeholder="Ex: 771234567" />
         </div>
-        <div class="settings-row" style="padding:8px 0;border-bottom:none;cursor:pointer;" onclick="toggleInvitedSwitch()">
-          <div>
-            <div class="settings-row-title" style="font-size:13px;">J'ai été invité(e) par un promoteur</div>
-            <div class="settings-row-sub">Active si un promoteur a déjà ajouté ton numéro à son équipe</div>
-          </div>
-          <div class="switch" id="invitedSwitch"></div>
+        <div class="filter-chips" id="regTypeChips" style="margin-bottom:14px;">
+          <div class="chip active" data-type="new" onclick="setRegisterType('new', this)">🌾 Je crée ma ferme</div>
+          <div class="chip" data-type="invited" onclick="setRegisterType('invited', this)">👥 J'ai été invité(e)</div>
         </div>
         <div id="newFarmFields">
           <div class="field">
@@ -2724,7 +2721,7 @@
    (Supabase > Project Settings > API)
 ---------------------------------------------------------------- */
 const SUPABASE_URL = 'https://wclntlgzhrcjddnxubzy.supabase.co/rest/v1/';
-const SUPABASE_ANON_KEY = sb_publishable_vXHr6Kvc2bNm5fUXvGdUIg_mGNoccvY';
+const SUPABASE_ANON_KEY = 'sb_publishable_vXHr6Kvc2bNm5fUXvGdUIg_mGNoccvY';
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 function needSupabaseWarning() {
   return !SUPABASE_URL || SUPABASE_URL.includes('xxxxxxxxxxxx') || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith('sb_publishable_vXHr6Kvc2bNm5fUXvGdUIg_mGNoccvY');
@@ -3311,10 +3308,12 @@ function switchAuthTab(tab) {
   $('#registerForm').classList.toggle('hidden', tab !== 'register');
 }
 
-function toggleInvitedSwitch() {
-  const sw = $('#invitedSwitch');
-  const isOn = sw.classList.toggle('on');
-  $('#newFarmFields').style.display = isOn ? 'none' : 'block';
+let registerType = 'new';
+function setRegisterType(type, el) {
+  registerType = type;
+  $$('#regTypeChips .chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  $('#newFarmFields').style.display = type === 'invited' ? 'none' : 'block';
 }
 
 async function handleRegister(e) {
@@ -3325,7 +3324,7 @@ async function handleRegister(e) {
   const phone = f.phone.value.trim();
   const password = f.password.value;
   const passwordConfirm = f.passwordConfirm.value;
-  const isInvited = $('#invitedSwitch').classList.contains('on');
+  const isInvited = registerType === 'invited';
   const farmName = f.farmName.value.trim();
   const address = f.address.value.trim();
 
