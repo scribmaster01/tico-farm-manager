@@ -2720,11 +2720,25 @@
    0) CONFIGURATION SUPABASE — à remplacer par les infos de ton projet
    (Supabase > Project Settings > API)
 ---------------------------------------------------------------- */
-const SUPABASE_URL = 'https://wclntlgzhrcjddnxubzy.supabase.co/rest/v1/';
+const SUPABASE_URL = 'https://wclntlgzhrcjddnxubzy.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_vXHr6Kvc2bNm5fUXvGdUIg_mGNoccvY';
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let supabase = null;
+let supabaseInitError = null;
+try {
+  if (!window.supabase) throw new Error("La bibliothèque Supabase ne s'est pas chargée (pas de connexion internet ?)");
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (e) {
+  supabaseInitError = e;
+  console.error('Initialisation Supabase impossible :', e);
+}
 function needSupabaseWarning() {
-  return !SUPABASE_URL || SUPABASE_URL.includes('xxxxxxxxxxxx') || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith('sb_publishable_vXHr6Kvc2bNm5fUXvGdUIg_mGNoccvY');
+  return !supabase || !SUPABASE_URL || SUPABASE_URL.includes('xxxxxxxxxxxx') || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith('COLLE_ICI');
+}
+function showOfflineBanner(message) {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#a51e1e;color:#fff;text-align:center;padding:10px 14px;font-size:13px;z-index:9999;';
+  el.textContent = message;
+  document.body.prepend(el);
 }
 
 /* Tranches d'âge de vente (poussins de couvoir ET cheptel d'engraissement) */
@@ -2766,6 +2780,7 @@ let state = {
   clients: [],
   growoutBatches: [],
   growoutLogs: [],
+  lotCostLogs: [],
   settings: { targetRate: 85, mortalityThreshold: 15, priceGridHatchery: defaultPriceGrid(500), priceGridGrowout: defaultPriceGrid(800) }
 };
 function saveState() { /* no-op volontaire : la persistance passe par Supabase */ }
@@ -2913,23 +2928,25 @@ function dbGrowoutLogToApp(r) {
 function dbTempLogToApp(r) {
   return { id: r.id, lotId: r.lot_id, date: r.date, temperature: r.temperature, humidity: r.humidity, notes: r.notes, createdAt: new Date(r.created_at).getTime() };
 }
+function dbLotCostLogToApp(r) {
+  return { id: r.id, lotId: r.lot_id, date: r.date, eggs: +r.cost_eggs||0, energy: +r.cost_energy||0, feed: +r.cost_feed||0, labor: +r.cost_labor||0, notes: r.notes, createdAt: new Date(r.created_at).getTime() };
+}
 
 /* ----------------------------------------------------------------
    4) CHARGEMENT / SYNCHRONISATION DES DONNÉES DE LA FERME
 ---------------------------------------------------------------- */
 async function reloadFarmData() {
   if (!currentFarmId) return;
-  const [lotsRes, costsRes, tempRes, clientsRes, batchesRes, logsRes] = await Promise.all([
+  const [lotsRes, costLogsRes, tempRes, clientsRes, batchesRes, logsRes] = await Promise.all([
     supabase.from('lots').select('*').eq('farm_id', currentFarmId).order('created_at', { ascending: false }),
-    supabase.from('lot_costs').select('*').eq('farm_id', currentFarmId),
+    supabase.from('lot_cost_logs').select('*').eq('farm_id', currentFarmId).order('date', { ascending: false }),
     supabase.from('temp_logs').select('*').eq('farm_id', currentFarmId).order('date', { ascending: false }),
     supabase.from('clients').select('*').eq('farm_id', currentFarmId).order('created_at', { ascending: false }),
     supabase.from('growout_batches').select('*').eq('farm_id', currentFarmId).order('created_at', { ascending: false }),
     supabase.from('growout_logs').select('*').eq('farm_id', currentFarmId).order('date', { ascending: false })
   ]);
-  const costsByLot = {};
-  (costsRes.data || []).forEach(c => { costsByLot[c.lot_id] = { eggs: +c.cost_eggs||0, energy: +c.cost_energy||0, feed: +c.cost_feed||0, labor: +c.cost_labor||0 }; });
-  state.lots = (lotsRes.data || []).map(r => { const l = dbLotToApp(r); l.costs = costsByLot[r.id] || l.costs; return l; });
+  state.lots = (lotsRes.data || []).map(dbLotToApp);
+  state.lotCostLogs = (costLogsRes.data || []).map(dbLotCostLogToApp);
   state.tempLogs = (tempRes.data || []).map(dbTempLogToApp);
   state.clients = (clientsRes.data || []).map(dbClientToApp);
   state.growoutBatches = (batchesRes.data || []).map(dbGrowoutBatchToApp);
@@ -2938,7 +2955,7 @@ async function reloadFarmData() {
 
 function subscribeToFarmAll(farmId, onAnyChange) {
   if (farmRealtimeChannel) { supabase.removeChannel(farmRealtimeChannel); farmRealtimeChannel = null; }
-  const tables = ['lots', 'lot_costs', 'temp_logs', 'clients', 'growout_batches', 'growout_logs'];
+  const tables = ['lots', 'lot_cost_logs', 'temp_logs', 'clients', 'growout_batches', 'growout_logs'];
   let channel = supabase.channel(`farm-${farmId}-all`);
   tables.forEach(table => {
     channel = channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `farm_id=eq.${farmId}` }, onAnyChange);
@@ -2958,6 +2975,10 @@ function userLots() { return state.lots; }
 function userTempLogs() { return state.tempLogs; }
 function userClients() { return state.clients; }
 function userGrowoutBatches() { return state.growoutBatches; }
+function getLotCostLogs(lotId) { return state.lotCostLogs.filter(l => l.lotId === lotId).sort((a,b) => new Date(b.date) - new Date(a.date)); }
+function calcLotCostsTotal(lotId) {
+  return getLotCostLogs(lotId).reduce((s,l) => ({ eggs: s.eggs+(+l.eggs||0), energy: s.energy+(+l.energy||0), feed: s.feed+(+l.feed||0), labor: s.labor+(+l.labor||0) }), { eggs: 0, energy: 0, feed: 0, labor: 0 });
+}
 function growoutLogsFor(batchId) { return state.growoutLogs.filter(g => g.batchId === batchId).sort((a,b) => new Date(b.date) - new Date(a.date)); }
 
 /* ================================================================
@@ -3010,12 +3031,17 @@ async function deleteLotRemote(lotId) {
 }
 
 /* ---------- Coûts d'un lot ---------- */
-async function saveLotCosts(lotId, farmId, costs) {
-  const { error } = await supabase.from('lot_costs').upsert({
-    lot_id: lotId, farm_id: farmId,
-    cost_eggs: costs.eggs || 0, cost_energy: costs.energy || 0, cost_feed: costs.feed || 0, cost_labor: costs.labor || 0,
-    updated_at: new Date().toISOString()
-  });
+/* ---------- Journal daté des dépenses d'un lot (remplace le total unique) ---------- */
+async function addLotCostLogRemote(lotId, farmId, userId, entry) {
+  const { data, error } = await supabase.from('lot_cost_logs').insert({
+    lot_id: lotId, farm_id: farmId, created_by: userId, date: entry.date,
+    cost_eggs: entry.eggs || 0, cost_energy: entry.energy || 0, cost_feed: entry.feed || 0, cost_labor: entry.labor || 0,
+    notes: entry.notes
+  }).select().single();
+  return error ? { error: error.message } : { log: data };
+}
+async function deleteLotCostLogRemote(id) {
+  const { error } = await supabase.from('lot_cost_logs').delete().eq('id', id);
   return error ? { error: error.message } : { ok: true };
 }
 
@@ -3318,6 +3344,7 @@ function setRegisterType(type, el) {
 
 async function handleRegister(e) {
   e.preventDefault();
+  if (!supabase) return toast('Connexion au serveur impossible — vérifiez votre connexion internet.', 'error');
   const f = e.target;
   const submitBtn = f.querySelector('button[type="submit"]');
   const firstName = f.firstName.value.trim();
@@ -3347,6 +3374,7 @@ async function handleRegister(e) {
 
 async function handleLogin(e) {
   e.preventDefault();
+  if (!supabase) return toast('Connexion au serveur impossible — vérifiez votre connexion internet.', 'error');
   const f = e.target;
   const submitBtn = f.querySelector('button[type="submit"]');
   const phone = f.phone.value.trim();
@@ -5093,12 +5121,12 @@ function renderTempChart() {
 }
 
 /* ================================================================
-   COSTS
+   COSTS — Journal daté des dépenses par lot (historique permanent)
 ================================================================ */
 function renderCostsContent() {
   return `
     <div class="section-title"><span class="section-title-text"><span class="material-symbols-outlined">payments</span>Coûts de production</span></div>
-    <p style="color:var(--text-muted);font-size:13px;margin-bottom:14px;">Renseignez les dépenses de chaque lot pour calculer automatiquement le coût de production par poussin.</p>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:14px;">Ajoutez une dépense datée pour chaque lot. L'historique complet reste visible en permanence, avec possibilité de supprimer une ligne.</p>
     <div id="costsSummary"></div>
     <div id="costsLotsList"></div>
   `;
@@ -5110,12 +5138,11 @@ function renderCosts() {
   const listEl = $('#costsLotsList');
   if (!summaryEl || !listEl) return;
 
-  // Somme de TOUTES les dépenses de production, tous lots confondus
   let totalAllCosts = 0;
   let totalAllChicks = 0;
   lots.forEach(lot => {
-    const costs = lot.costs || { eggs: 0, energy: 0, feed: 0, labor: 0 };
-    totalAllCosts += (+costs.eggs||0) + (+costs.energy||0) + (+costs.feed||0) + (+costs.labor||0);
+    const c = calcLotCostsTotal(lot.id);
+    totalAllCosts += c.eggs + c.energy + c.feed + c.labor;
     totalAllChicks += calcLot(lot).poussinsSains;
   });
   const globalCostPerChick = totalAllChicks > 0 ? (totalAllCosts / totalAllChicks) : 0;
@@ -5133,9 +5160,10 @@ function renderCosts() {
 
   listEl.innerHTML = lots.map(lot => {
     const cl = calcLot(lot);
-    const costs = lot.costs || { eggs: 0, energy: 0, feed: 0, labor: 0 };
-    const total = (+costs.eggs||0) + (+costs.energy||0) + (+costs.feed||0) + (+costs.labor||0);
+    const costs = calcLotCostsTotal(lot.id);
+    const total = costs.eggs + costs.energy + costs.feed + costs.labor;
     const costPerChick = cl.poussinsSains > 0 ? (total / cl.poussinsSains) : 0;
+    const logs = getLotCostLogs(lot.id);
     return `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
         <div style="font-weight:700;">Lot ${escHtml(lot.lotNumber || lot.id.slice(-4))}</div>
@@ -5144,32 +5172,57 @@ function renderCosts() {
           <button type="button" class="btn btn-ghost btn-sm btn-icon" title="Supprimer ce lot" onclick="deleteLot('${lot.id}')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>
         </div>
       </div>
-      <form onsubmit="saveCosts(event, '${lot.id}')">
+      <form onsubmit="addLotCostLog(event, '${lot.id}')">
+        <div class="field-row">
+          <div class="field"><label>Date *</label><input type="date" name="date" required value="${new Date().toISOString().slice(0,10)}" /></div>
+          <div class="field"><label>Notes</label><input type="text" name="notes" placeholder="Optionnel" /></div>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div class="field"><label>🥚 Œufs</label><input type="number" name="eggs" min="0" value="${costs.eggs||0}" /></div>
-          <div class="field"><label>⚡ Énergie</label><input type="number" name="energy" min="0" value="${costs.energy||0}" /></div>
-          <div class="field"><label>🌾 Aliment</label><input type="number" name="feed" min="0" value="${costs.feed||0}" /></div>
-          <div class="field"><label>👷 Main d'œuvre</label><input type="number" name="labor" min="0" value="${costs.labor||0}" /></div>
+          <div class="field"><label>🥚 Œufs</label><input type="number" name="eggs" min="0" value="0" /></div>
+          <div class="field"><label>⚡ Énergie</label><input type="number" name="energy" min="0" value="0" /></div>
+          <div class="field"><label>🌾 Aliment</label><input type="number" name="feed" min="0" value="0" /></div>
+          <div class="field"><label>👷 Main d'œuvre</label><input type="number" name="labor" min="0" value="0" /></div>
         </div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;padding:12px;background:var(--bg-2);border-radius:10px;">
-          <div><div style="font-size:12px;color:var(--text-muted);">Coût total · / poussin</div><div style="font-size:14px;font-weight:700;">${fmtNumber(total)} → <span style="color:var(--primary-light);">${fmtNumber(costPerChick,0)}</span></div></div>
-          <button type="submit" class="btn btn-primary btn-sm"><span class="material-symbols-outlined" style="font-size:16px;">save</span>Enregistrer</button>
-        </div>
+        <button type="submit" class="btn btn-primary btn-block btn-sm"><span class="material-symbols-outlined" style="font-size:16px;">add</span>Ajouter la dépense</button>
       </form>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:12px 0;padding:12px;background:var(--bg-2);border-radius:10px;">
+        <div><div style="font-size:12px;color:var(--text-muted);">Coût total · / poussin</div><div style="font-size:14px;font-weight:700;">${fmtNumber(total)} → <span style="color:var(--primary-light);">${fmtNumber(costPerChick,0)}</span></div></div>
+      </div>
+      <div class="card-title" style="margin-bottom:8px;font-size:13px;"><span class="material-symbols-outlined" style="font-size:18px;">history</span>Historique des dépenses (${logs.length})</div>
+      ${logs.length === 0 ? '<div class="empty" style="padding:14px 0;"><div class="empty-text">Aucune dépense enregistrée pour ce lot</div></div>' : logs.map(l => {
+        const lineTotal = (+l.eggs||0)+(+l.energy||0)+(+l.feed||0)+(+l.labor||0);
+        return `<div class="list-item">
+          <div class="list-item-icon"><span class="material-symbols-outlined">receipt_long</span></div>
+          <div class="list-item-content">
+            <div class="list-item-title">${fmtDate(l.date)} · ${fmtNumber(lineTotal)} F</div>
+            <div class="list-item-sub">🥚${fmtNumber(l.eggs)} · ⚡${fmtNumber(l.energy)} · 🌾${fmtNumber(l.feed)} · 👷${fmtNumber(l.labor)}${l.notes?` · ${escHtml(l.notes)}`:''}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm btn-icon" onclick="deleteLotCostLog('${l.id}')" title="Supprimer"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>
+        </div>`;
+      }).join('')}
     </div>`;
   }).join('');
 }
 
-async function saveCosts(e, lotId) {
+async function addLotCostLog(e, lotId) {
   e.preventDefault();
   const f = e.target;
   const data = getFormData(f);
-  const costs = { eggs: +data.eggs||0, energy: +data.energy||0, feed: +data.feed||0, labor: +data.labor||0 };
-  const result = await saveLotCosts(lotId, currentFarmId, costs);
+  const result = await addLotCostLogRemote(lotId, currentFarmId, sessionUser?.id, { date: data.date, eggs: +data.eggs||0, energy: +data.energy||0, feed: +data.feed||0, labor: +data.labor||0, notes: data.notes });
   if (result.error) return toast(result.error, 'error');
   await reloadFarmData();
-  toast('Coûts enregistrés', 'success');
+  toast('Dépense ajoutée', 'success');
   renderCosts();
+}
+
+function deleteLotCostLog(id) {
+  showConfirm('Supprimer cette dépense ?', '', async () => {
+    const result = await deleteLotCostLogRemote(id);
+    if (result.error) return toast(result.error, 'error');
+    await reloadFarmData();
+    toast('Dépense supprimée', 'success');
+    renderCosts();
+  });
 }
 
 /* ================================================================
@@ -5232,17 +5285,19 @@ function computeFinances(preset) {
   const pendingClients = clients.filter(c => c.status === 'reserved' && inRange(toTimestamp(c.createdAt), start, end));
   const pendingAmount = pendingClients.reduce((s,c) => s + (+c.totalAmount||0), 0);
 
-  // DÉPENSES COUVOIR : coûts des lots, rattachés à la date de collecte (ou création du lot)
-  const lotsInRange = lots.filter(l => inRange(toTimestamp(l.collectionDate || l.createdAt), start, end));
+  // DÉPENSES COUVOIR : chaque dépense du journal daté, rattachée à sa propre date
+  const lotIdsOfFarm = new Set(lots.map(l => l.id));
+  const costLogsInRange = state.lotCostLogs.filter(l => lotIdsOfFarm.has(l.lotId) && inRange(toTimestamp(l.date || l.createdAt), start, end));
   const expByCat = { eggs: 0, energy: 0, feed: 0, labor: 0 };
-  lotsInRange.forEach(l => {
-    const c = l.costs || {};
-    expByCat.eggs += (+c.eggs||0);
-    expByCat.energy += (+c.energy||0);
-    expByCat.feed += (+c.feed||0);
-    expByCat.labor += (+c.labor||0);
+  costLogsInRange.forEach(l => {
+    expByCat.eggs += (+l.eggs||0);
+    expByCat.energy += (+l.energy||0);
+    expByCat.feed += (+l.feed||0);
+    expByCat.labor += (+l.labor||0);
   });
   const totalHatcheryExpenses = expByCat.eggs + expByCat.energy + expByCat.feed + expByCat.labor;
+  // (les poussins produits sur la période restent basés sur la date de collecte du lot, indépendamment des dépenses)
+  const lotsInRange = lots.filter(l => inRange(toTimestamp(l.collectionDate || l.createdAt), start, end));
 
   // DÉPENSES ENGRAISSEMENT : achat des cheptels démarrés sur la période + intrants saisis sur la période
   const batchesInRange = batches.filter(b => inRange(toTimestamp(b.startDate || b.createdAt), start, end));
@@ -5361,7 +5416,7 @@ function renderFinances() {
     </div>
 
     <div class="finance-disclaimer">
-      Document généré automatiquement par Tico Farm Manager à partir des données déclarées par l'utilisateur, selon le référentiel du Système Minimal de Trésorerie (SMT — normes comptables OHADA/SYSCOHADA applicables aux très petites entreprises). Il a un caractère indicatif et ne remplace pas un état financier certifié par un expert-comptable agréé. Les dépenses sont rattachées à la date de collecte de chaque lot ; les recettes à la date de paiement déclarée par l'utilisateur.
+      Document généré automatiquement par Tico Farm Manager à partir des données déclarées par l'utilisateur, selon le référentiel du Système Minimal de Trésorerie (SMT — normes comptables OHADA/SYSCOHADA applicables aux très petites entreprises). Il a un caractère indicatif et ne remplace pas un état financier certifié par un expert-comptable agréé. Les dépenses sont rattachées à leur date réelle de saisie (journal daté) ; les recettes à la date de paiement déclarée par l'utilisateur.
     </div>
   `;
 }
@@ -5709,7 +5764,7 @@ function deleteGrowoutBatch(id) {
 ================================================================ */
 function exportAppData() {
   try {
-    const backup = { exportedAt: new Date().toISOString(), farm: currentFarmInfo, lots: state.lots, tempLogs: state.tempLogs, clients: state.clients, growoutBatches: state.growoutBatches, growoutLogs: state.growoutLogs, settings: state.settings };
+    const backup = { exportedAt: new Date().toISOString(), farm: currentFarmInfo, lots: state.lots, lotCostLogs: state.lotCostLogs, tempLogs: state.tempLogs, clients: state.clients, growoutBatches: state.growoutBatches, growoutLogs: state.growoutLogs, settings: state.settings };
     const dataStr = JSON.stringify(backup, null, 2);
     const blob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -5772,11 +5827,11 @@ async function confirmImportMerge() {
   await reloadFarmData();
   refreshAll();
 }
-const IMPORT_LABELS = { lots: 'lot(s)', tempLogs: 'relevé(s) T°/humidité', clients: 'vente(s)/client(s)', growoutBatches: 'cheptel(s)', growoutLogs: 'entrée(s) de journal' };
+const IMPORT_LABELS = { lots: 'lot(s)', tempLogs: 'relevé(s) T°/humidité', clients: 'vente(s)/client(s)', growoutBatches: 'cheptel(s)', growoutLogs: 'entrée(s) de journal', lotCostLogs: 'dépense(s) de couvoir' };
 /* Pousse chaque élément du fichier importé vers Supabase via les fonctions de
    création habituelles (les coûts par lot sont réappliqués séparément). */
 async function mergeImportedData(imported) {
-  const counts = { lots: 0, tempLogs: 0, clients: 0, growoutBatches: 0, growoutLogs: 0 };
+  const counts = { lots: 0, tempLogs: 0, clients: 0, growoutBatches: 0, growoutLogs: 0, lotCostLogs: 0 };
   const lotIdMap = {}; // ancien id (fichier) -> nouvel id Supabase
   const batchIdMap = {};
 
@@ -5785,7 +5840,7 @@ async function mergeImportedData(imported) {
     if (!r.error) {
       lotIdMap[l.id] = r.lot.id;
       counts.lots++;
-      // Réapplique l'état d'avancement (collecte/incubation/mirages/éclosion) + les coûts
+      // Réapplique l'état d'avancement (collecte/incubation/mirages/éclosion)
       await supabase.from('lots').update({
         collection_date: l.collectionDate || null, collection_quantity: l.collectionQuantity || null, collection_cracked: l.collectionCracked || 0, collection_validated: !!l.collectionValidated,
         incubation_date: l.incubationDate || null, incubation_validated: !!l.incubationValidated,
@@ -5793,7 +5848,11 @@ async function mergeImportedData(imported) {
         candling14_date: l.candling14Date || null, candling14_contaminated: l.candling14Contaminated || 0, candling14_mortality: l.candling14Mortality || 0, candling14_validated: !!l.candling14Validated,
         hatching_date: l.hatchingDate || null, hatching_malformation: l.hatchingMalformation || 0, hatching_dead: l.hatchingDead || 0, hatching_validated: !!l.hatchingValidated
       }).eq('id', r.lot.id);
-      if (l.costs) await saveLotCosts(r.lot.id, currentFarmId, l.costs);
+      // Ancien format (total unique) -> une ligne datée d'aujourd'hui, pour ne rien perdre
+      if (l.costs && ((+l.costs.eggs||0)+(+l.costs.energy||0)+(+l.costs.feed||0)+(+l.costs.labor||0) > 0)) {
+        const cr = await addLotCostLogRemote(r.lot.id, currentFarmId, sessionUser?.id, { date: l.collectionDate || new Date().toISOString().slice(0,10), eggs: l.costs.eggs, energy: l.costs.energy, feed: l.costs.feed, labor: l.costs.labor, notes: '' });
+        if (!cr.error) counts.lotCostLogs++;
+      }
     }
   }
   for (const b of (imported.growoutBatches || [])) {
@@ -5803,6 +5862,12 @@ async function mergeImportedData(imported) {
   for (const t of (imported.tempLogs || [])) {
     const r = await addTempLogRemote(currentFarmId, sessionUser?.id, { lotId: lotIdMap[t.lotId] || null, date: t.date, temperature: t.temperature, humidity: t.humidity, notes: t.notes });
     if (!r.error) counts.tempLogs++;
+  }
+  for (const cl of (imported.lotCostLogs || [])) {
+    const newLotId = lotIdMap[cl.lotId];
+    if (!newLotId) continue;
+    const r = await addLotCostLogRemote(newLotId, currentFarmId, sessionUser?.id, { date: cl.date, eggs: cl.eggs, energy: cl.energy, feed: cl.feed, labor: cl.labor, notes: cl.notes });
+    if (!r.error) counts.lotCostLogs++;
   }
   for (const g of (imported.growoutLogs || [])) {
     const newBatchId = batchIdMap[g.batchId];
@@ -6396,14 +6461,24 @@ document.addEventListener('click', (e) => {
 ================================================================ */
 window.addEventListener('DOMContentLoaded', async () => {
   applyStoredTheme();
-  if (needSupabaseWarning()) {
-    toast('⚠️ Configuration Supabase manquante — voir SUPABASE_URL / SUPABASE_ANON_KEY dans le code', 'error');
-  }
   $('#authScreen').style.display = 'flex';
   $('#app').style.display = 'none';
-  // Session déjà active (utilisateur déjà connecté précédemment) ?
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) { await bootstrapSession(); }
+
+  if (!supabase) {
+    showOfflineBanner('⚠️ Connexion au serveur impossible. Vérifiez votre connexion internet et rechargez la page.');
+  } else {
+    if (needSupabaseWarning()) {
+      toast('⚠️ Configuration Supabase manquante — voir SUPABASE_URL / SUPABASE_ANON_KEY dans le code', 'error');
+    }
+    try {
+      // Session déjà active (utilisateur déjà connecté précédemment) ?
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) { await bootstrapSession(); }
+    } catch (e) {
+      console.error('Erreur de connexion au serveur :', e);
+      showOfflineBanner('⚠️ Connexion au serveur impossible. Vérifiez votre connexion internet et rechargez la page.');
+    }
+  }
 
   $$('.modal-overlay').forEach(o => {
     o.addEventListener('click', (e) => {
